@@ -1,0 +1,151 @@
+import torch 
+import timm
+import os,sys
+from torch import nn
+from omegaconf import OmegaConf
+from ..base.FoundationStereo.core.foundation_stereo import FoundationStereo, normalize_image
+from ..base.FoundationStereo.core.submodule import build_gwc_volume, build_concat_volume, disparity_regression
+from ..base.FoundationStereo.core.geometry import Combined_Geo_Encoding_Volume
+from .foundationstereo_config import FoundationStereoConfig
+import torchvision.transforms as tvtf
+from .utils.block import ResBlock
+import torch.nn.functional as F
+
+
+class FoundationStereoModel(nn.Module):
+    def __init__(self, config: FoundationStereoConfig):
+        super().__init__()
+        # 1. 加载 FoundationStereo 模型
+        self.config = config
+        self.model = self._load_model()
+        self.model.eval()
+        for param in self.model.parameters():
+            param.requires_grad = False
+        # 2. token 压缩卷积层
+        self.compressor = self._build_compressor()
+        self.compressor.train()
+        for param in self.compressor.parameters():
+            param.requires_grad = True
+        # 3. token 还原卷积层
+        self.decompressor = self._build_decompressor()
+        self.decompressor.train()
+        for param in self.decompressor.parameters():
+            param.requires_grad = True
+
+
+    def _load_model(self):
+        cfg = OmegaConf.load(f'{self.config.checkpoint_path}/cfg.yaml')
+        cfg['vit_size'] = 'vitl'
+        args = OmegaConf.create(cfg)
+        model = FoundationStereo(args)
+        ckpt = torch.load(os.path.join(self.config.checkpoint_path, "model_best_bp2.pth"), weights_only=False)
+        model.load_state_dict(ckpt['model'])
+        model.cuda()
+        model.to(self.config.dtype)
+        return model
+    
+
+    def _build_compressor(self):
+        return nn.Sequential(
+            nn.Conv2d(2912, 2688, kernel_size=1),
+            nn.GroupNorm(32, 2688),
+            nn.SiLU(),
+            
+            nn.Conv2d(2688, 2496, kernel_size=3, stride=2, padding=1),
+            nn.GroupNorm(32, 2496),
+            nn.SiLU(),
+            ResBlock(2496),
+
+            nn.Conv2d(2496, 2272, kernel_size=3, stride=2, padding=1),
+            nn.GroupNorm(32, 2272),
+            nn.SiLU(),
+            ResBlock(2272),
+
+            nn.Conv2d(2272, self.config.dim, kernel_size=3, stride=2, padding=1),
+            nn.GroupNorm(32, self.config.dim),
+            nn.SiLU(),
+        ).to(self.config.dtype).cuda()
+    
+
+    def _build_decompressor(self):
+        return nn.Sequential(
+            # 14 -> 28
+            nn.Conv2d(self.config.dim, 1024 * 4, kernel_size=3, padding=1),
+            nn.PixelShuffle(2), 
+            nn.GroupNorm(32, 1024), nn.SiLU(),
+            
+            # 28 -> 56
+            nn.Conv2d(1024, 512 * 4, kernel_size=3, padding=1),
+            nn.PixelShuffle(2), 
+            nn.GroupNorm(32, 512), nn.SiLU(),
+            
+            # 56 -> 112
+            nn.Conv2d(512, 2912 * 4, kernel_size=3, padding=1),
+            nn.PixelShuffle(2)
+        ).to(self.config.dtype).cuda()
+
+    def FoundationStereoEncoder(self, left_current_frame, right_current_frame): # left_current_frame/right_current_frame: [B, 3, 448, 448]
+        with torch.no_grad():
+            # 1. 查看输入图片数量
+            left_num = len(left_current_frame)
+            # 2. 标准化图片
+            left_current_frame = normalize_image(left_current_frame)
+            right_current_frame = normalize_image(right_current_frame)
+            # 3. 提取特征
+            out, vit_feat = self.model.feature(torch.cat([left_current_frame, right_current_frame], dim=0))
+            left_vit_feat = vit_feat[:left_num]
+            features_left = [o[:left_num] for o in out]
+            features_right = [o[left_num:] for o in out]
+            # 4. 计算两图匹配度
+            gwc_volume = build_gwc_volume(features_left[0], features_right[0], self.model.args.max_disp//4, self.model.cv_group)  # Group-wise correlation volume (B, N_group, max_disp, H, W)
+            left_tmp = self.model.proj_cmb(features_left[0])
+            right_tmp = self.model.proj_cmb(features_right[0])
+            concat_volume = build_concat_volume(left_tmp, right_tmp, maxdisp=self.model.args.max_disp//4)
+            del left_tmp, right_tmp
+            # 5. 特征融合
+            comb_volume = torch.cat([gwc_volume, concat_volume], dim=1)
+            comb_volume = self.model.corr_stem(comb_volume)
+            comb_volume = self.model.corr_feature_att(comb_volume, features_left[0])
+            comb_volume = self.model.cost_agg(comb_volume, features_left)
+            # 6. token 化 & token 压缩
+            comb_volume_compressed = comb_volume.reshape(comb_volume.shape[0], -1, *comb_volume.shape[3:]).permute(0, 2, 3, 1)
+        comb_volume_compressed = self.compressor(comb_volume_compressed.permute(0, 3, 1, 2)).flatten(2).transpose(1, 2)
+
+        return comb_volume, comb_volume_compressed, left_vit_feat, features_left, features_right
+    
+
+    def FoundationStereoDecoder(self, comb_volume, comb_volume_compressed, left_current_frame, left_vit_feat, features_left, features_right, iters = 10):
+        B, n, d = comb_volume_compressed.shape
+        # 1. 还原token
+        comb_volume_decompressed = self.decompressor(comb_volume_compressed.transpose(1, 2).reshape(B, d, int(n** 0.5), int(n** 0.5))).permute(0, 2, 3, 1)
+        # 2. 残差计算
+        comb_volume_decompressed = comb_volume_decompressed.permute(0, 3, 1, 2).reshape(comb_volume.shape[0], comb_volume.shape[1], comb_volume.shape[2], comb_volume.shape[3], comb_volume.shape[4])
+        comb_volume = comb_volume + comb_volume_decompressed
+        # 3. 初始化深度估计图
+        prob = F.softmax(self.model.classifier(comb_volume).squeeze(1), dim=1) 
+        init_disp = disparity_regression(prob, self.model.args.max_disp//4) 
+        # 4. 多尺度特征提取
+        with torch.no_grad():
+            cnet_list = self.model.cnet(left_current_frame, vit_feat=left_vit_feat, num_layers=self.model.args.n_gru_layers)   #(1/4, 1/8, 1/16)
+            cnet_list = list(cnet_list)
+            net_list = [torch.tanh(x[0]) for x in cnet_list]   
+            inp_list = [torch.relu(x[1]) for x in cnet_list]   
+            inp_list = [self.model.cam(x) * x for x in inp_list]
+            att = [self.model.sam(x) for x in inp_list]
+            stem_2x = self.model.stem_2(left_current_frame)
+        # 5. GRU 迭代精修
+        geo_fn = Combined_Geo_Encoding_Volume(features_left[0].float(), features_right[0].float(), comb_volume.float(), num_levels=self.model.args.corr_levels, dx=self.model.dx)
+        b, c, h, w = features_left[0].shape
+        coords = torch.arange(w, dtype=torch.float, device=init_disp.device).reshape(1,1,w,1).repeat(b, h, 1, 1)  # (B,H,W,1) Horizontal only
+        disp = init_disp.float()
+        for itr in range(iters):
+            disp = disp.detach()
+            geo_feat = geo_fn(disp, coords, low_memory=False)
+            with torch.cuda.amp.autocast(enabled=self.model.args.mixed_precision):
+                net_list, mask_feat_4, delta_disp = self.model.update_block(net_list, inp_list, geo_feat, disp, att)
+            disp = disp + delta_disp.float()
+            if itr < iters-1:
+                continue
+            disp_up = self.model.upsample_disp(disp.float(), mask_feat_4.float(), stem_2x.float())
+        return disp_up
+        
