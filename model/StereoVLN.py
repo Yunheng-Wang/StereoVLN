@@ -7,6 +7,8 @@ from .modules.vlm import InternVLModel
 from .modules.vlm_config import InternVLConfig
 from .modules.dino import DINOv2
 from .modules.dino_config import DINOv2Config
+from .modules.pointhead import PointHead
+from .modules.pointhead_config import PointHeadConfig
 from .utils.prompt import temple, system_description, history_description, current_left_description, current_right_description, depth_description, other
 from typing import List, Optional
 
@@ -23,8 +25,12 @@ class StereoVLN(nn.Module):
         # 3. 创建 DINOv2
         DINOConfig = DINOv2Config()
         self.DINO = DINOv2(DINOConfig)
-
-
+        # 4. 左眼 Point Head
+        LeftPointHeadConfig = PointHeadConfig()
+        self.LeftPointHead = PointHead(LeftPointHeadConfig)
+        # 5. 右眼 Point Head
+        RightPointHeadConfig = PointHeadConfig()
+        self.RightPointHead = PointHead(RightPointHeadConfig)
 
 
     def forward(
@@ -34,7 +40,8 @@ class StereoVLN(nn.Module):
         right_current_frame: torch.Tensor,  # [B, 1, 3, 448, 448] - 0~255
         left_history_video: torch.Tensor,   # [B, 8, 3, 448, 448] - 0~255
         right_history_video: torch.Tensor,  # [B, 8, 3, 448, 448] - 0~255
-        labels: Optional[torch.Tensor] = None,
+        label_left_point: torch.Tensor,     # [B, 2] 
+        label_right_point: torch.Tensor,    # [B, 2] 
     ) -> torch.Tensor:
         # 0. 深度编码（左右当前帧） (196 tokens) -> 获取左视角深度
         depth_feature, depth_token, left_vit_feat, features_left, features_right = self.FoundationStereo.FoundationStereoEncoder(left_current_frame.squeeze(1), right_current_frame.squeeze(1))
@@ -117,16 +124,13 @@ class StereoVLN(nn.Module):
         left_current_output_tokens = all_visual_output_tokens[:, l_hist : l_hist + l_left, :]
         right_current_output_tokens = all_visual_output_tokens[:, l_hist + l_left : l_hist + l_left + l_right, :]
 
-        # 9. 输入到 LLM Head 层
-        
+        # 9. 输入到 Point Head 层
+        left_point = self.LeftPointHead(left_current_output_tokens)
+        right_point = self.RightPointHead(right_current_output_tokens)
 
-
-        
-
-        # 10. 深度图估计
+        # 10. depth decoder 估计
         depth = self.FoundationStereo.FoundationStereoDecoder(depth_feature, depth_output_tokens, left_current_frame.squeeze(1), left_vit_feat, features_left, features_right, iters = 10)
         
-        pass
 
 
 

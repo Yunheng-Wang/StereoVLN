@@ -18,9 +18,19 @@ if __name__ == "__main__":
 
     left_his_video = torch.rand(batch_size, 8, 3, image_size, image_size, device="cuda", dtype=torch.bfloat16)* 255
     right_his_video = torch.rand(batch_size, 8, 3, image_size, image_size, device="cuda", dtype=torch.bfloat16)* 255
-    
+
+    label_left_point = torch.rand(batch_size, 2, device="cuda", dtype=torch.bfloat16)* image_size
+    label_right_point = torch.rand(batch_size, 2, device="cuda", dtype=torch.bfloat16)* image_size
+
     model = StereoVLN()
-    model(instruction, left_cur_video, right_cur_video, left_his_video, right_his_video)
+
+    total_params = sum(p.numel() for p in model.parameters())
+    trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+
+    print("total:", total_params, "->", total_params / 1e9, "B")
+    print("trainable:", trainable_params, "->", trainable_params / 1e9, "B")
+
+    model(instruction, left_cur_video, right_cur_video, left_his_video, right_his_video, label_left_point, label_right_point)
 
 
 
