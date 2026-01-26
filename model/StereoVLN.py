@@ -7,7 +7,9 @@ from .modules.vlm import InternVLModel
 from .modules.vlm_config import InternVLConfig
 from .modules.dino import DINOv2
 from .modules.dino_config import DINOv2Config
-from .utils.prompt import temple, system_description, history_description, current_left_description, current_right_description, depth_description
+from .utils.prompt import temple, system_description, history_description, current_left_description, current_right_description, depth_description, other
+from typing import List, Optional
+
 
 class StereoVLN(nn.Module):
     def __init__(self):
@@ -32,6 +34,7 @@ class StereoVLN(nn.Module):
         right_current_frame: torch.Tensor,  # [B, 1, 3, 448, 448] - 0~255
         left_history_video: torch.Tensor,   # [B, 8, 3, 448, 448] - 0~255
         right_history_video: torch.Tensor,  # [B, 8, 3, 448, 448] - 0~255
+        labels: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         # 0. 深度编码（左右当前帧） (196 tokens) -> 获取左视角深度
         depth_feature, depth_token, left_vit_feat, features_left, features_right = self.FoundationStereo.FoundationStereoEncoder(left_current_frame.squeeze(1), right_current_frame.squeeze(1))
@@ -67,7 +70,8 @@ class StereoVLN(nn.Module):
                     current_right_description = current_right_description, 
                     current_right_frame = right_frame_str,
                     depth_description = depth_description,
-                    depth_frame = depth_frame_str
+                    depth_frame = depth_frame_str,
+                    other = other
                 )
             batch_prompts.append(prompt)
         # 4. Tokenizer 处理文本
@@ -113,7 +117,7 @@ class StereoVLN(nn.Module):
         left_current_output_tokens = all_visual_output_tokens[:, l_hist : l_hist + l_left, :]
         right_current_output_tokens = all_visual_output_tokens[:, l_hist + l_left : l_hist + l_left + l_right, :]
 
-        
+        # 9. 输入到 LLM Head 层
         
 
 
