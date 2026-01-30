@@ -147,5 +147,16 @@ class FoundationStereoModel(nn.Module):
             if itr < iters-1:
                 continue
             disp_up = self.model.upsample_disp(disp.float(), mask_feat_4.float(), stem_2x.float())
-        return disp_up
-        
+        # 6. 计算有效的视差 (left view)
+        if disp_up.dim() == 4 and disp_up.size(1) == 1:
+            disp_up = disp_up[:, 0]
+        b, h, w = disp_up.shape
+        x = torch.arange(w, device=disp_up.device, dtype=disp_up.dtype).view(1, 1, w).expand(b, h, w)
+        invalid = (x - disp_up) < 0
+        disp = disp_up.clamp_min(1e-6)
+        # 7. 估计深度（左视角）
+        fx = float(self.config.K[0, 0])
+        baseline = float(self.config.camera_dis)
+        depth = (fx * baseline) / disp
+        depth = depth.masked_fill(invalid, float("inf"))
+        return depth

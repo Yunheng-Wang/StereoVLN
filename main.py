@@ -22,6 +22,9 @@ if __name__ == "__main__":
     label_left_point = torch.rand(batch_size, 2, device="cuda", dtype=torch.bfloat16)* image_size
     label_right_point = torch.rand(batch_size, 2, device="cuda", dtype=torch.bfloat16)* image_size
 
+    label_depth = torch.rand(batch_size, 1, image_size, image_size, device="cuda", dtype=torch.bfloat16)* 100
+    label_answer = ["<action>Move forward</action><action>Move forward</action><action>Move forward</action><action>Move forward</action>"] * batch_size
+
     model = StereoVLN()
 
     total_params = sum(p.numel() for p in model.parameters())
@@ -30,7 +33,7 @@ if __name__ == "__main__":
     print("total:", total_params, "->", total_params / 1e9, "B")
     print("trainable:", trainable_params, "->", trainable_params / 1e9, "B")
 
-    model(instruction, left_cur_video, right_cur_video, left_his_video, right_his_video, label_left_point, label_right_point)
+    model(instruction, left_cur_video, right_cur_video, left_his_video, right_his_video, label_left_point, label_right_point, label_depth, label_answer)
 
 
 

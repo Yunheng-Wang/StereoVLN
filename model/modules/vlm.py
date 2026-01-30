@@ -11,7 +11,7 @@ class InternVLModel(nn.Module):
         super().__init__()
         self.config = config
         # 1. 加载InterVL模型
-        self.model = AutoModel.from_pretrained(config.checkpoint_path, torch_dtype=config.dtype, use_flash_attn=True, trust_remote_code=True, device_map="cuda")
+        self.model = AutoModel.from_pretrained(config.checkpoint_path, torch_dtype=config.dtype, use_flash_attn=False, attn_implementation="eager", trust_remote_code=True, device_map="cuda")
         # 2. 冻结视觉编码器 & 激活其他层
         self.model.vision_model.eval()
         for param in self.model.vision_model.parameters():
@@ -21,7 +21,7 @@ class InternVLModel(nn.Module):
             param.requires_grad = True
         # 3. 加载 tokenizer
         self.tokenizer = AutoTokenizer.from_pretrained(config.checkpoint_path, trust_remote_code=True, use_fast=False, model_max_length = config.max_tokens, padding_side="right")
-        self.tokenizer.add_special_tokens({'additional_special_tokens': ['<dep>', '</dep>']})
+        self.tokenizer.add_special_tokens({'additional_special_tokens': ['<dep>', '</dep>','<action>', '</action>']})
         self.model.language_model.resize_token_embeddings(len(self.tokenizer), pad_to_multiple_of = 64)
 
         # 4. 加载标准化层
