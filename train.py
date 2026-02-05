@@ -15,7 +15,7 @@ from torch.utils.data import DataLoader
 from torch.cuda.amp import autocast
 from torch.utils.data.distributed import DistributedSampler
 from accelerate import Accelerator
-from accelerate.utils import ProjectConfiguration
+from accelerate.utils import ProjectConfiguration, DistributedDataParallelKwargs
 from omegaconf import OmegaConf
 from datetime import datetime
 from accelerate.utils import InitProcessGroupKwargs
@@ -146,7 +146,10 @@ def learning():
         mixed_precision = config.main.dtype,
         project_dir = config.main.save_root,
         project_config = ProjectConfiguration(total_limit= 20),
-        kwargs_handlers = [InitProcessGroupKwargs(timeout=timedelta(seconds=3600))]
+        kwargs_handlers = [
+            InitProcessGroupKwargs(timeout=timedelta(seconds=3600)),
+            DistributedDataParallelKwargs(find_unused_parameters=True)
+        ]
     )
     rank = accelerator.process_index
     world_size = accelerator.num_processes

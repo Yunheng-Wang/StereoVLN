@@ -29,8 +29,8 @@ training:
     warmup_ratio: 0.075  
     min_lr_ratio: 0.1
 
-  weight_pointsloss: 1.0
-  weight_depthloss: 1.0
+  weight_pointsloss: 0.1
+  weight_depthloss: 0.1
   weight_languageloss: 1.0
 
 

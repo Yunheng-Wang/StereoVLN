@@ -303,6 +303,8 @@ class StereoVLN(nn.Module):
         valid = torch.isfinite(depth) & torch.isfinite(label_depth_sq) & (label_depth_sq > 0)
         if valid.any():
             depth_loss = F.smooth_l1_loss(depth[valid], label_depth_sq[valid], reduction="mean")
+            # 裁剪 depth loss 以防止极端值破坏训练
+            depth_loss = torch.clamp(depth_loss, max=10.0)
         else:
             depth_loss = torch.tensor(0.0, device=depth.device, dtype=depth.dtype)
         # 15. 语言性动作估计 & loss
