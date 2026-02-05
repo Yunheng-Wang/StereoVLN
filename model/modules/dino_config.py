@@ -1,8 +1,8 @@
 import torch
 from dataclasses import dataclass
-
+from typing import Optional, Tuple
 
 @dataclass 
 class DINOv2Config:
-    image_size = (448,448)
-    dtype = torch.bfloat16
+    image_size: Tuple[int, int] = (448, 448)
+    dtype: torch.dtype = torch.bfloat16

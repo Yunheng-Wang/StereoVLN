@@ -2,4 +2,14 @@ __pycache__/
 
 model/base/
 
+data/cache/
+data/scene/
+data/task/
+data/R2R.tar
+data/RxR.tar
 
+cache/
+
+log/
+
+habitat-lab/

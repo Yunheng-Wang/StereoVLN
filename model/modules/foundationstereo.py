@@ -17,6 +17,8 @@ class FoundationStereoModel(nn.Module):
         super().__init__()
         # 1. 加载 FoundationStereo 模型
         self.config = config
+        if torch.all(self.config.intrinsic == 0):
+            raise ValueError("You must provide a valid intrinsic matrix.")
         self.model = self._load_model()
         self.model.eval()
         for param in self.model.parameters():
@@ -155,8 +157,8 @@ class FoundationStereoModel(nn.Module):
         invalid = (x - disp_up) < 0
         disp = disp_up.clamp_min(1e-6)
         # 7. 估计深度（左视角）
-        fx = float(self.config.K[0, 0])
-        baseline = float(self.config.camera_dis)
+        fx = float(self.config.intrinsic[0, 0])
+        baseline = float(self.config.camera_baseline)
         depth = (fx * baseline) / disp
         depth = depth.masked_fill(invalid, float("inf"))
         return depth
