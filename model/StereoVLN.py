@@ -259,6 +259,7 @@ class StereoVLN(nn.Module):
                 use_cache=False,
             )
         del custom_attention_mask  # 立即释放大型 attention mask
+        del input_embeds  # 释放 input embeddings
         # 10. 整理输出token
         output_tokens = output.hidden_states[-1]
         del output
@@ -306,36 +307,41 @@ class StereoVLN(nn.Module):
             # 裁剪 depth loss 以防止极端值破坏训练
             depth_loss = torch.clamp(depth_loss, max=10.0)
         else:
-            depth_loss = torch.tensor(0.0, device=depth.device, dtype=depth.dtype)
+            depth_loss = (depth * 0.0).sum()
+            depth_loss = depth_loss.to(depth.dtype)  # 确保类型一致
         # 15. 语言性动作估计 & loss
-        # 优化：只对 answer tokens 计算 lm_head，大幅节省显存
-        # 原本: lm_head([B, seq_len, dim]) -> [B, seq_len, vocab_size] 非常大
-        # 优化后: 只计算 answer 部分，节省 ~50x 显存
-        language_loss = torch.tensor(0.0, device=input_ids.device)
-        valid_token_count = 0
-        loss_fct = nn.CrossEntropyLoss(reduction='none')
+        # 优化：创建 answer mask，一次性计算所有 answer tokens 的 logits
+        # 这样避免在循环中多次调用 lm_head，解决 DDP 参数重用问题
+        answer_mask_2d = torch.zeros((B, input_ids.shape[1]), dtype=torch.bool, device=input_ids.device)
         for b in range(B):
             answer_start = prompt_lengths[b]
-            seq_length = input_ids.shape[1]
-            if answer_start >= seq_length - 1:
-                continue
-            # 只提取 answer 部分的 hidden states，再计算 lm_head
-            answer_hidden = output_tokens[b, answer_start:-1, :]  # [answer_len-1, dim]
-            answer_logits = self.VLM.model.language_model.lm_head(answer_hidden)  # [answer_len-1, vocab]
-            # 获取标签
-            answer_labels = input_ids[b, answer_start+1:]
-            answer_mask = attention_mask[b, answer_start+1:]
+            if answer_start < input_ids.shape[1] - 1:
+                answer_mask_2d[b, answer_start:-1] = True
+        # 一次性计算所有位置的 logits（只计算有 answer 的位置）
+        if answer_mask_2d.any():
+            # 提取所有 answer positions 的 hidden states
+            answer_hidden = output_tokens[answer_mask_2d]  # [total_answer_tokens, dim]
+            answer_logits = self.VLM.model.language_model.lm_head(answer_hidden)  # [total_answer_tokens, vocab]
+            # 创建对应的 labels mask
+            label_mask_2d = torch.zeros((B, input_ids.shape[1]), dtype=torch.bool, device=input_ids.device)
+            for b in range(B):
+                answer_start = prompt_lengths[b]
+                if answer_start < input_ids.shape[1] - 1:
+                    label_mask_2d[b, answer_start+1:] = True
+            # 提取对应的 labels 和 attention mask
+            answer_labels = input_ids[label_mask_2d]  # [total_answer_tokens]
+            answer_attention = attention_mask[label_mask_2d]  # [total_answer_tokens]
             # 计算 loss
-            if answer_mask.sum() > 0:
-                per_token_loss = loss_fct(answer_logits, answer_labels)
-                masked_loss = per_token_loss * answer_mask.float()
-                language_loss += masked_loss.sum()
-                valid_token_count += answer_mask.sum().item()
-        # 15.1. 平均loss
-        if valid_token_count > 0:
-            language_loss = language_loss / valid_token_count
+            loss_fct = nn.CrossEntropyLoss(reduction='none')
+            per_token_loss = loss_fct(answer_logits, answer_labels)
+            masked_loss = per_token_loss * answer_attention.float()
+
+            if answer_attention.sum() > 0:
+                language_loss = masked_loss.sum() / answer_attention.sum()
+            else:
+                language_loss = torch.tensor(0.0, device=input_ids.device)
         else:
-            language_loss = language_loss * 0.0
+            language_loss = torch.tensor(0.0, device=input_ids.device)
         # 16. 返回所有losses
         return {
             'point_loss': point_loss,

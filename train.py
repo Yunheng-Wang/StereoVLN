@@ -146,11 +146,7 @@ def learning():
         mixed_precision = config.main.dtype,
         project_dir = config.main.save_root,
         project_config = ProjectConfiguration(total_limit= 20),
-        kwargs_handlers = [
-            InitProcessGroupKwargs(timeout=timedelta(seconds=3600)),
-            DistributedDataParallelKwargs(find_unused_parameters=True)
-        ]
-    )
+        kwargs_handlers = [InitProcessGroupKwargs(timeout=timedelta(seconds=3600))])
     rank = accelerator.process_index
     world_size = accelerator.num_processes
     save_path = os.path.join(config.main.save_root, datetime.now().strftime("%Y-%m-%d_%H"))
