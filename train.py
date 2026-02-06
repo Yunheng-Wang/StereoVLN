@@ -232,10 +232,10 @@ def learning():
                 accelerator.clip_grad_norm_(model.parameters(), config.main.gradient.grad_clip_norm)
             ## 8.6 更新参数
             optimizer.step()
-            scheduler.step()
             optimizer.zero_grad()
             if accelerator.sync_gradients:
-                global_step += 1 
+                scheduler.step()
+                global_step += 1
         ## 8.7 记录日志
         if accelerator.sync_gradients:
             # 计算平均值
