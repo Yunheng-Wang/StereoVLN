@@ -1,7 +1,7 @@
 # 全局batch_size 为  batch_size * GPU_NUM * grad_accumulation_steps
 
 main:
-  batch_size: 1
+  batch_size: 2
   save_root: "log/"
   dtype: "bf16"
   image_size: 448

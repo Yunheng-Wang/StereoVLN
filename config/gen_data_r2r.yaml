@@ -50,5 +50,5 @@ habitat:
   dataset:
     type: R2RVLN-v1
     split: val_seen
-    scenes_dir: scene/
-    data_path: task/r2r/{split}/{split}.json.gz
+    scenes_dir: data/scene/
+    data_path: data/task/r2r/{split}/{split}.json.gz
