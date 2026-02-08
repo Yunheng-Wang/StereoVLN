@@ -5,7 +5,7 @@ main:
   save_root: "log/"
   dtype: "bf16"
   image_size: 448
-  training_epoch: 3   # (episodes <648629> * epoch_num) / (batch_size * GPU_NUM * grad_accumulation_steps) 
+  training_epoch: 2   # (episodes <648629> * epoch_num) / (batch_size * GPU_NUM * grad_accumulation_steps) 
   cpu_workers_num: 8
   prediction_steps: 4
   history_steps: 8
@@ -14,23 +14,23 @@ main:
 
   gradient:
     grad_clip_norm: 0.5  # 梯度裁剪
-    grad_accumulation_steps: 1  # 梯度累计
+    grad_accumulation_steps: 4  # 梯度累计
 
 
 
 training:
   optimizer:
     lr: 3.0e-5
-    weight_decay: 0.0
+    weight_decay: 0.01
     betas: [0.9, 0.999]
     eps: 1.0e-8
   scheduler:
-    type: "cosine"
-    warmup_ratio: 0.075  
-    min_lr_ratio: 0.1
+    type: "cosine"  # 使用 cosine annealing (单调递减)
+    warmup_ratio: 0.075
+    num_cycles: 0.5
 
   weight_pointsloss: 0.1
-  weight_depthloss: 0.1
+  weight_depthloss: 0.5
   weight_languageloss: 1.0
 
 
@@ -38,13 +38,11 @@ training:
 model:
   dim: 2048
   vlm:
-    max_tokens: 4096 # vision tokens: 2756
+    max_tokens: 4096 # vision tokens: 2756 # history action : 800 # other: 540
     vlm_checkpoints_path: "/home/CONNECT/yfang870/yunhengwang/StereoVLN/model/base/InternVL3_5-2B"
   foundationstereo:
     foundationstereo_checkpoints_path: "/home/CONNECT/yfang870/yunhengwang/StereoVLN/model/base/FoundationStereo/checkpoints/23-51-11"
   pointhead:
     mlp_ratio: 0.5
     dropout: 0.1
-
-
 

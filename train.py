@@ -100,8 +100,8 @@ def build_model_and_optimizer(config, num_all_episodes, world_size):
         name=config.training.scheduler.type,  
         optimizer=optimizer,
         num_warmup_steps=int(max_training_steps * config.training.scheduler.warmup_ratio),
-        num_training_steps=max_training_steps
-
+        num_training_steps=max_training_steps,
+        num_cycles=config.training.scheduler.num_cycles
     )
     return model, optimizer, scheduler, max_training_steps
 

@@ -127,13 +127,44 @@ class StereoVLN(nn.Module):
             # 4.4. 深度
             t_dep = depth_token.shape[1]
             depth_frame_str = "<dep>" + "<IMG_CONTEXT>" * t_dep + "</dep>"
-            # 4.5 组织 text instruction
+            # 4.5 智能压缩过长的 history action
+            max_history_action_tokens = 800
+            history_action_tokens = self.VLM.tokenizer(history_action[b], add_special_tokens=False)['input_ids']
+            if len(history_action_tokens) > max_history_action_tokens:
+                import re
+                actions = re.findall(r'<action>(.*?)</action>', history_action[b])
+                compressed = []
+                i = 0
+                while i < len(actions):
+                    current = actions[i]
+                    count = 1
+                    # 计算连续相同动作的数量
+                    while i + count < len(actions) and actions[i + count] == current:
+                        count += 1
+                    # 只对简单移动动作进行合并（保留转向、停止等关键动作）
+                    if count > 3 and current.lower() in ['move forward', 'turn left', 'turn right']:
+                        compressed.append(f"{current} x{count}")
+                    else:
+                        compressed.extend([current] * count)
+                    i += count
+                compressed_history = ''.join([f'<action>{a}</action>' for a in compressed])
+                # 如果压缩后还是太长，从前面截断（保留最近的动作）
+                compressed_tokens = self.VLM.tokenizer(compressed_history, add_special_tokens=False)['input_ids']
+                if len(compressed_tokens) > max_history_action_tokens:
+                    truncated_tokens = compressed_tokens[-max_history_action_tokens:]
+                    final_history_action = self.VLM.tokenizer.decode(truncated_tokens)
+                    logger.warning(f"Sample {b}: Compressed and truncated history_action from {len(history_action_tokens)} to {len(truncated_tokens)} tokens")
+                else:
+                    final_history_action = compressed_history
+                    logger.info(f"Sample {b}: Compressed history_action from {len(history_action_tokens)} to {len(compressed_tokens)} tokens")
+            else:
+                final_history_action = history_action[b]
+            # 4.6 组织 prompt
             instruction_text = other.format(
                 instruction = instruction[b],
                 history_action_description = history_action_description,
-                history_action = history_action[b]
+                history_action = final_history_action
             )
-            # 4.6 填入模板
             prompt = temple.format(
                     system_description = system_description,
                     history_description = history_description,
@@ -238,10 +269,10 @@ class StereoVLN(nn.Module):
         padding_mask = attention_mask.unsqueeze(1).expand(B, seq_len, seq_len)
         custom_attention_mask = custom_attention_mask * padding_mask
         del padding_mask  # 立即释放
-        # 7.4 转换为适合模型的格式 (0 -> -inf, 1 -> 0)，并转为4D mask
-        # 先转换 dtype 以避免精度问题
+        # 7.4 转换为适合模型的格式 (0 -> -1e4, 1 -> 0)，并转为4D mask
+        # 使用 -1e4 而不是 finfo().min，避免极端负数导致数值不稳定
         custom_attention_mask = custom_attention_mask.to(input_embeds.dtype)
-        custom_attention_mask = (1.0 - custom_attention_mask) * torch.finfo(custom_attention_mask.dtype).min
+        custom_attention_mask = (1.0 - custom_attention_mask) * (-1e4)
         # 添加head维度：[B, seq_len, seq_len] -> [B, 1, seq_len, seq_len]
         custom_attention_mask = custom_attention_mask.unsqueeze(1)
         # 8. 位置编码
@@ -293,22 +324,40 @@ class StereoVLN(nn.Module):
         # 11. 输入到 Point Head 层
         left_point = self.LeftPointHead(left_current_output_tokens)
         right_point = self.RightPointHead(right_current_output_tokens)
-        # 12. point loss
-        left_point_loss = F.smooth_l1_loss(left_point, label_left_point, reduction="mean")
-        right_point_loss = F.smooth_l1_loss(right_point, label_right_point, reduction="mean")
-        point_loss = (left_point_loss + right_point_loss) / 2.0  # 取平均以保持与其他 loss 量级一致
-        # 13. depth 估计 (左视角)
+        # 12. point loss (清理 NaN/Inf 同时保持梯度流)
+        if torch.isnan(left_point).any() or torch.isinf(left_point).any():
+            logger.warning("NaN/Inf detected in left_point, cleaning values")
+            left_point_clean = torch.nan_to_num(left_point, nan=0.0, posinf=1e6, neginf=-1e6)
+            left_point_loss = F.smooth_l1_loss(left_point_clean, label_left_point, reduction="mean")
+        else:
+            left_point_loss = F.smooth_l1_loss(left_point, label_left_point, reduction="mean")
+
+        if torch.isnan(right_point).any() or torch.isinf(right_point).any():
+            logger.warning("NaN/Inf detected in right_point, cleaning values")
+            right_point_clean = torch.nan_to_num(right_point, nan=0.0, posinf=1e6, neginf=-1e6)
+            right_point_loss = F.smooth_l1_loss(right_point_clean, label_right_point, reduction="mean")
+        else:
+            right_point_loss = F.smooth_l1_loss(right_point, label_right_point, reduction="mean")
+
+        point_loss = (left_point_loss + right_point_loss) / 2.0        # 13. depth 估计 (左视角)
         depth = self.FoundationStereo.FoundationStereoDecoder(depth_feature, depth_output_tokens, left_current_frame.squeeze(1), left_vit_feat, features_left, features_right, iters = 10)
-        # 14. depth loss
+        # 14. depth loss (清理 NaN/Inf 同时保持梯度流)
         label_depth_sq = label_depth.squeeze(1)
-        valid = torch.isfinite(depth) & torch.isfinite(label_depth_sq) & (label_depth_sq > 0)
+        # 先清理 depth 中的异常值
+        if torch.isnan(depth).any() or torch.isinf(depth).any():
+            logger.warning("NaN/Inf detected in depth, cleaning values")
+            depth_clean = torch.nan_to_num(depth, nan=0.0, posinf=1e6, neginf=-1e6)
+        else:
+            depth_clean = depth
+
+        valid = torch.isfinite(depth_clean) & torch.isfinite(label_depth_sq) & (label_depth_sq > 0)
         if valid.any():
-            depth_loss = F.smooth_l1_loss(depth[valid], label_depth_sq[valid], reduction="mean")
+            depth_loss = F.smooth_l1_loss(depth_clean[valid], label_depth_sq[valid], reduction="mean")
             # 裁剪 depth loss 以防止极端值破坏训练
             depth_loss = torch.clamp(depth_loss, max=10.0)
         else:
-            depth_loss = (depth * 0.0).sum()
-            depth_loss = depth_loss.to(depth.dtype)  # 确保类型一致
+            # 没有有效像素时，使用0梯度的loss（保持梯度流）
+            depth_loss = (depth_clean * 0.0).mean()
         # 15. 语言性动作估计 & loss
         # 优化：创建 answer mask，一次性计算所有 answer tokens 的 logits
         # 这样避免在循环中多次调用 lm_head，解决 DDP 参数重用问题
@@ -323,6 +372,12 @@ class StereoVLN(nn.Module):
             # 提取所有 answer positions 的 hidden states
             answer_hidden = output_tokens[answer_mask_2d]  # [total_answer_tokens, dim]
             answer_logits = self.VLM.model.language_model.lm_head(answer_hidden)  # [total_answer_tokens, vocab]
+
+            # 清理 logits 中的异常值（保持梯度流）
+            if torch.isnan(answer_logits).any() or torch.isinf(answer_logits).any():
+                logger.warning("NaN/Inf detected in answer_logits, cleaning values")
+                answer_logits = torch.nan_to_num(answer_logits, nan=0.0, posinf=1e4, neginf=-1e4)
+
             # 创建对应的 labels mask
             label_mask_2d = torch.zeros((B, input_ids.shape[1]), dtype=torch.bool, device=input_ids.device)
             for b in range(B):
@@ -341,9 +396,11 @@ class StereoVLN(nn.Module):
             if answer_attention.sum() > 0:
                 language_loss = masked_loss.sum() / answer_attention.sum()
             else:
-                language_loss = torch.tensor(0.0, device=input_ids.device)
+                # 保持梯度流
+                language_loss = (answer_hidden * 0.0).mean()
         else:
-            language_loss = torch.tensor(0.0, device=input_ids.device)
+            # 保持梯度流
+            language_loss = (output_tokens * 0.0).mean()
         # 16. 返回所有losses
         return {
             'point_loss': point_loss,
@@ -449,9 +506,9 @@ class StereoVLN(nn.Module):
         # 应用 padding mask
         padding_mask = attention_mask.unsqueeze(1).expand(B, seq_len, seq_len)
         custom_attention_mask = custom_attention_mask * padding_mask
-        # 转换格式 (0 -> -inf, 1 -> 0)
+        # 转换格式 (0 -> -1e4, 1 -> 0)
         custom_attention_mask = custom_attention_mask.to(input_embeds.dtype)
-        custom_attention_mask = (1.0 - custom_attention_mask) * torch.finfo(custom_attention_mask.dtype).min
+        custom_attention_mask = (1.0 - custom_attention_mask) * (-1e4)
         custom_attention_mask = custom_attention_mask.unsqueeze(1)  # [B, 1, seq_len, seq_len]
         # 9. 获取 hidden states 用于 point/depth prediction
         with torch.cuda.amp.autocast(dtype=torch.bfloat16):
@@ -554,8 +611,8 @@ class StereoVLN(nn.Module):
                         attn_mask[b, 0, 0, left_positions_list[b]] = 0
                     if len(depth_positions_list[b]) > 0:
                         attn_mask[b, 0, 0, depth_positions_list[b]] = 0
-            # 转换格式 (0 -> -inf, 1 -> 0)
-            attn_mask = (1.0 - attn_mask) * torch.finfo(attn_mask.dtype).min
+            # 转换格式 (0 -> -1e4, 1 -> 0)
+            attn_mask = (1.0 - attn_mask) * (-1e4)
 
             with torch.cuda.amp.autocast(dtype=torch.bfloat16):
                 outputs = self.VLM.model.language_model(
