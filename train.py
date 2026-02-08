@@ -23,7 +23,7 @@ from datetime import timedelta
 
 from model.StereoVLNConfig import StereoVLNConfig
 from model.StereoVLN import StereoVLN
-from transformers import get_scheduler
+from transformers import get_cosine_schedule_with_warmup
 from data.datasetloader import Dataset_Normal
 from utils.save import save_model_hook
 
@@ -96,8 +96,7 @@ def build_model_and_optimizer(config, num_all_episodes, world_size):
     # 3. 创建 scheduler
     gloal_batch_size = config.main.batch_size * config.main.gradient.grad_accumulation_steps * world_size
     max_training_steps = math.ceil((config.main.training_epoch * num_all_episodes) / gloal_batch_size)
-    scheduler = get_scheduler(
-        name=config.training.scheduler.type,  
+    scheduler = get_cosine_schedule_with_warmup(
         optimizer=optimizer,
         num_warmup_steps=int(max_training_steps * config.training.scheduler.warmup_ratio),
         num_training_steps=max_training_steps,

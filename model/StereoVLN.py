@@ -339,25 +339,19 @@ class StereoVLN(nn.Module):
         else:
             right_point_loss = F.smooth_l1_loss(right_point, label_right_point, reduction="mean")
 
-        point_loss = (left_point_loss + right_point_loss) / 2.0        # 13. depth 估计 (左视角)
+        point_loss = (left_point_loss + right_point_loss) / 2.0        
+        # 13. depth 估计 (左视角)
         depth = self.FoundationStereo.FoundationStereoDecoder(depth_feature, depth_output_tokens, left_current_frame.squeeze(1), left_vit_feat, features_left, features_right, iters = 10)
-        # 14. depth loss (清理 NaN/Inf 同时保持梯度流)
+        # 14. depth loss
         label_depth_sq = label_depth.squeeze(1)
-        # 先清理 depth 中的异常值
-        if torch.isnan(depth).any() or torch.isinf(depth).any():
-            logger.warning("NaN/Inf detected in depth, cleaning values")
-            depth_clean = torch.nan_to_num(depth, nan=0.0, posinf=1e6, neginf=-1e6)
-        else:
-            depth_clean = depth
-
-        valid = torch.isfinite(depth_clean) & torch.isfinite(label_depth_sq) & (label_depth_sq > 0)
+        valid = torch.isfinite(depth) & torch.isfinite(label_depth_sq) & (label_depth_sq > 0)
         if valid.any():
-            depth_loss = F.smooth_l1_loss(depth_clean[valid], label_depth_sq[valid], reduction="mean")
+            depth_loss = F.smooth_l1_loss(depth[valid], label_depth_sq[valid], reduction="mean")
             # 裁剪 depth loss 以防止极端值破坏训练
             depth_loss = torch.clamp(depth_loss, max=10.0)
         else:
-            # 没有有效像素时，使用0梯度的loss（保持梯度流）
-            depth_loss = (depth_clean * 0.0).mean()
+            finite_depth = torch.where(torch.isfinite(depth), depth, torch.zeros_like(depth))
+            depth_loss = (finite_depth * 0.0).mean()
         # 15. 语言性动作估计 & loss
         # 优化：创建 answer mask，一次性计算所有 answer tokens 的 logits
         # 这样避免在循环中多次调用 lm_head，解决 DDP 参数重用问题
@@ -396,11 +390,13 @@ class StereoVLN(nn.Module):
             if answer_attention.sum() > 0:
                 language_loss = masked_loss.sum() / answer_attention.sum()
             else:
-                # 保持梯度流
-                language_loss = (answer_hidden * 0.0).mean()
+                # 保持梯度流，避免 NaN * 0 = NaN
+                finite_hidden = torch.where(torch.isfinite(answer_hidden), answer_hidden, torch.zeros_like(answer_hidden))
+                language_loss = (finite_hidden * 0.0).mean()
         else:
-            # 保持梯度流
-            language_loss = (output_tokens * 0.0).mean()
+            # 保持梯度流，避免 NaN * 0 = NaN
+            finite_tokens = torch.where(torch.isfinite(output_tokens), output_tokens, torch.zeros_like(output_tokens))
+            language_loss = (finite_tokens * 0.0).mean()
         # 16. 返回所有losses
         return {
             'point_loss': point_loss,
